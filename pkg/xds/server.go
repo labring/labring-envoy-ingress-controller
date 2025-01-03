@@ -4,204 +4,137 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"sync"
-	"time"
 
 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
-	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+	router "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
+	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
-	xds "github.com/envoyproxy/go-control-plane/pkg/server/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/server/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/anypb"
-	"google.golang.org/protobuf/types/known/durationpb"
 )
 
-type Server struct {
-	ctx        context.Context
-	server     xds.Server
-	cache      cache.SnapshotCache
-	grpcServer *grpc.Server
-	version    int64
-	mutex      sync.Mutex
+type EnvoyXdsServer struct {
+	server server.Server
+	cache  cache.SnapshotCache
 }
 
-func NewServer(ctx context.Context) *Server {
+func NewXdsServer() *EnvoyXdsServer {
 	cache := cache.NewSnapshotCache(false, cache.IDHash{}, nil)
-	srv := xds.NewServer(ctx, cache, nil)
-	return &Server{
-		ctx:     ctx,
-		server:  srv,
-		cache:   cache,
-		version: 0,
+	srv := server.NewServer(context.Background(), cache, nil)
+	return &EnvoyXdsServer{
+		server: srv,
+		cache:  cache,
 	}
 }
 
-func (s *Server) Run(address string) error {
+func (s *EnvoyXdsServer) Start(address string) error {
 	grpcServer := grpc.NewServer()
-	discovery.RegisterAggregatedDiscoveryServiceServer(grpcServer, s.server)
-
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
-		return fmt.Errorf("failed to listen: %v", err)
+		return err
 	}
 
-	s.grpcServer = grpcServer
+	// Register all xDS services
+	resource.RegisterRouteDiscoveryServiceServer(grpcServer, s.server)
+	resource.RegisterEndpointDiscoveryServiceServer(grpcServer, s.server)
+	resource.RegisterClusterDiscoveryServiceServer(grpcServer, s.server)
+	resource.RegisterListenerDiscoveryServiceServer(grpcServer, s.server)
+
 	return grpcServer.Serve(listener)
 }
 
-func (s *Server) Stop() {
-	if s.grpcServer != nil {
-		s.grpcServer.GracefulStop()
-	}
-}
-
-func (s *Server) UpdateConfig(nodeID string, listeners []types.Resource, clusters []types.Resource, routes []types.Resource, endpoints []types.Resource) error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	s.version++
-	version := fmt.Sprintf("v%d", s.version)
-
-	snapshot, err := cache.NewSnapshot(version,
-		map[resource.Type][]types.Resource{
-			resource.ListenerType: listeners,
-			resource.ClusterType: clusters,
-			resource.RouteType:   routes,
-			resource.EndpointType: endpoints,
-		},
-	)
+func (s *EnvoyXdsServer) UpdateConfig(nodeID string, clusters []*cluster.Cluster, routes []*route.RouteConfiguration) error {
+	// Create a listener with HTTP connection manager
+	routerConfig, err := anypb.New(&router.Router{})
 	if err != nil {
-		return fmt.Errorf("failed to create snapshot: %v", err)
+		return fmt.Errorf("failed to marshal router config: %v", err)
 	}
 
-	return s.cache.SetSnapshot(context.Background(), nodeID, snapshot)
-}
+	manager := &hcm.HttpConnectionManager{
+		CodecType:  hcm.HttpConnectionManager_AUTO,
+		StatPrefix: "ingress_http",
+		RouteSpecifier: &hcm.HttpConnectionManager_RouteConfig{
+			RouteConfig: routes[0],
+		},
+		HttpFilters: []*hcm.HttpFilter{{
+			Name: wellknown.Router,
+			ConfigType: &hcm.HttpFilter_TypedConfig{
+				TypedConfig: routerConfig,
+			},
+		}},
+	}
 
-// Helper functions for creating Envoy resources
-func CreateListener(name string, address string, port uint32, routeName string) *listener.Listener {
-	return &listener.Listener{
-		Name: name,
+	pbst, err := anypb.New(manager)
+	if err != nil {
+		return fmt.Errorf("failed to marshal connection manager: %v", err)
+	}
+
+	listener := &listener.Listener{
+		Name: "http_listener",
 		Address: &core.Address{
 			Address: &core.Address_SocketAddress{
 				SocketAddress: &core.SocketAddress{
 					Protocol: core.SocketAddress_TCP,
-					Address:  address,
+					Address:  "0.0.0.0",
 					PortSpecifier: &core.SocketAddress_PortValue{
-						PortValue: port,
+						PortValue: 80,
 					},
 				},
 			},
 		},
 		FilterChains: []*listener.FilterChain{{
 			Filters: []*listener.Filter{{
-				Name: "envoy.filters.network.http_connection_manager",
+				Name: wellknown.HTTPConnectionManager,
 				ConfigType: &listener.Filter_TypedConfig{
-					TypedConfig: &anypb.Any{
-						TypeUrl: "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
-						Value: []byte(`{
-							"stat_prefix": "ingress_http",
-							"codec_type": "AUTO",
-							"rds": {
-								"route_config_name": "` + routeName + `",
-								"config_source": {
-									"resource_api_version": "V3",
-									"ads": {}
-								}
-							},
-							"http_filters": [{
-								"name": "envoy.filters.http.router"
-							}]
-						}`),
-					},
+					TypedConfig: pbst,
 				},
 			}},
 		}},
 	}
-}
 
-func CreateCluster(name string, endpoints []*endpoint.LbEndpoint) *cluster.Cluster {
-	return &cluster.Cluster{
-		Name:                 name,
-		ConnectTimeout:      durationpb.New(5 * time.Second),
-		ClusterDiscoveryType: &cluster.Cluster_Type{
-			Type: cluster.Cluster_STRICT_DNS,
-		},
-		LbPolicy:            cluster.Cluster_ROUND_ROBIN,
-		LoadAssignment: &endpoint.ClusterLoadAssignment{
-			ClusterName: name,
-			Endpoints: []*endpoint.LocalityLbEndpoints{{
-				LbEndpoints: endpoints,
-			}},
-		},
-	}
-}
-
-func CreateRoute(name string, domains []string, clusters []*cluster.Cluster) *route.RouteConfiguration {
-	var virtualHosts []*route.VirtualHost
-	for i, cluster := range clusters {
-		virtualHosts = append(virtualHosts, &route.VirtualHost{
-			Name:    fmt.Sprintf("%s-vhost-%d", name, i),
-			Domains: domains,
-			Routes: []*route.Route{{
-				Match: &route.RouteMatch{
-					PathSpecifier: &route.RouteMatch_Prefix{
-						Prefix: "/",
-					},
-				},
-				Action: &route.Route_Route{
-					Route: &route.RouteAction{
-						ClusterSpecifier: &route.RouteAction_Cluster{
-							Cluster: cluster.Name,
-						},
-						Timeout: durationpb.New(15 * time.Second),
-					},
-				},
-			}},
+	// Create snapshot with all resources
+	snap, err := cache.NewSnapshot("1",
+		map[resource.Type][]types.Resource{
+			resource.ClusterType:  convertToResource(clusters),
+			resource.RouteType:    convertToResource(routes),
+			resource.ListenerType: {listener},
 		})
+	if err != nil {
+		return fmt.Errorf("failed to create snapshot: %v", err)
 	}
-	
-	return &route.RouteConfiguration{
-		Name:         name,
-		VirtualHosts: virtualHosts,
+
+	// Set the snapshot for the node
+	err = s.cache.SetSnapshot(context.Background(), nodeID, snap)
+	if err != nil {
+		return fmt.Errorf("failed to set snapshot: %v", err)
 	}
+
+	return nil
 }
 
-func CreateEndpoint(clusterName string, addresses []string, ports []uint32) *endpoint.ClusterLoadAssignment {
-	var endpoints []*endpoint.LbEndpoint
-	for i, addr := range addresses {
-		port := uint32(80)
-		if i < len(ports) {
-			port = ports[i]
+func convertToResource(resources interface{}) []types.Resource {
+	switch v := resources.(type) {
+	case []*cluster.Cluster:
+		result := make([]types.Resource, len(v))
+		for i, r := range v {
+			result[i] = r
 		}
-		endpoints = append(endpoints, &endpoint.LbEndpoint{
-			HostIdentifier: &endpoint.LbEndpoint_Endpoint{
-				Endpoint: &endpoint.Endpoint{
-					Address: &core.Address{
-						Address: &core.Address_SocketAddress{
-							SocketAddress: &core.SocketAddress{
-								Protocol: core.SocketAddress_TCP,
-								Address:  addr,
-								PortSpecifier: &core.SocketAddress_PortValue{
-									PortValue: port,
-								},
-							},
-						},
-					},
-				},
-			},
-		})
-	}
-	
-	return &endpoint.ClusterLoadAssignment{
-		ClusterName: clusterName,
-		Endpoints: []*endpoint.LocalityLbEndpoints{{
-			LbEndpoints: endpoints,
-		}},
+		return result
+	case []*route.RouteConfiguration:
+		result := make([]types.Resource, len(v))
+		for i, r := range v {
+			result[i] = r
+		}
+		return result
+	default:
+		return nil
 	}
 }

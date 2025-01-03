@@ -43,23 +43,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create output directory
-	err = os.MkdirAll("generated", 0755)
-	if err != nil {
-		fmt.Printf("Failed to create output directory: %v\n", err)
-		os.Exit(1)
-	}
-
 	// Generate namespace manifests
-	nsFile, err := os.Create("generated/00-namespaces.yaml")
-	if err != nil {
-		fmt.Printf("Failed to create namespace file: %v\n", err)
-		os.Exit(1)
-	}
-	defer nsFile.Close()
-
 	for i := 0; i < *nsCount; i++ {
-		fmt.Fprintf(nsFile, `
+		fmt.Printf(`
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -68,28 +54,17 @@ metadata:
 `, i)
 	}
 
-	// Generate ingress manifests in batches
-	batchSize := 1000
-	for i := 0; i < *count; i += batchSize {
-		filename := fmt.Sprintf("generated/%02d-ingresses.yaml", i/batchSize)
-		f, err := os.Create(filename)
-		if err != nil {
-			fmt.Printf("Failed to create file %s: %v\n", filename, err)
+	// Generate ingress manifests
+	for i := 0; i < *count; i++ {
+		data := IngressData{
+			Index:     i,
+			Namespace: i % *nsCount,
+		}
+		if err := tmpl.Execute(os.Stdout, data); err != nil {
+			fmt.Printf("Failed to execute template: %v\n", err)
 			os.Exit(1)
 		}
-
-		for j := 0; j < batchSize && i+j < *count; j++ {
-			data := IngressData{
-				Index:     i + j,
-				Namespace: (i + j) % *nsCount,
-			}
-			if err := tmpl.Execute(f, data); err != nil {
-				fmt.Printf("Failed to execute template: %v\n", err)
-				os.Exit(1)
-			}
-			fmt.Fprintln(f, "---")
-		}
-		f.Close()
+		fmt.Println("---")
 	}
 
 	fmt.Printf("Generated %d ingress resources across %d namespaces\n", *count, *nsCount)

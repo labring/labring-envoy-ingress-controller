@@ -79,24 +79,26 @@ func (r *IngressReconciler) processBatch() {
 		batchLog.Info("Processing batch of ingress updates")
 
 		// Convert ingress rules to Envoy configuration
-		var listeners []types.Resource
 		var clusters []types.Resource
-		var routes []types.Resource
 		var endpoints []types.Resource
+		var virtualHosts []*route.VirtualHost
 
 		for _, ingress := range r.updateQueue {
 			// Process each ingress rule
 			for _, rule := range ingress.Spec.Rules {
-				// Create a unique name for this host
-				name := fmt.Sprintf("%s-%s", ingress.Namespace, rule.Host)
-
 				// Skip rules without HTTP configuration
 				if rule.HTTP == nil {
 					continue
 				}
 
+				// Create a unique name for this host
+				name := fmt.Sprintf("%s-%s", ingress.Namespace, rule.Host)
+				domains := []string{rule.Host}
+				if rule.Host == "" {
+					domains = []string{"*"}
+				}
+
 				// Create endpoints and clusters for each backend
-				var routeClusters []*cluster.Cluster
 				for _, path := range rule.HTTP.Paths {
 					backend := path.Backend
 					svcName := fmt.Sprintf("%s-%s", name, backend.Service.Name)
@@ -110,18 +112,19 @@ func (r *IngressReconciler) processBatch() {
 					// Create cluster
 					clusterObj := xds.CreateCluster(svcName, ep.Endpoints[0].LbEndpoints)
 					clusters = append(clusters, clusterObj)
-					routeClusters = append(routeClusters, clusterObj)
 				}
 
-				// Create route configuration
-				route := xds.CreateRoute(name, []string{rule.Host}, routeClusters)
-				routes = append(routes, route)
-
-				// Create listener for the host
-				listener := xds.CreateListener(name, "0.0.0.0", 80, name)
-				listeners = append(listeners, listener)
+				// Create virtual host for the rule
+				virtualHost := xds.CreateVirtualHost(name, domains, rule.HTTP.Paths)
+				virtualHosts = append(virtualHosts, virtualHost)
 			}
 		}
+
+		// Create a single route configuration with all virtual hosts
+		routes := []types.Resource{xds.CreateRoute("ingress_http", virtualHosts)}
+
+		// Create a single listener for all ingress rules
+		listeners := []types.Resource{xds.CreateListener("ingress_http", "0.0.0.0", 80, "ingress_http")}
 
 		// Update xDS server with new configuration
 		if err := r.XDSServer.UpdateConfig("ingress", listeners, clusters, routes, endpoints); err != nil {
