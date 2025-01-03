@@ -110,8 +110,8 @@ func (r *IngressReconciler) processBatch() {
 					cluster := xds.CreateCluster(svcName, ep.Endpoints[0].LbEndpoints)
 					clusters = append(clusters, cluster)
 
-					// Create route configuration with proper type assertion
-					route := xds.CreateRoute(name, []string{rule.Host}, []*clusterv3.Cluster{cluster.(*clusterv3.Cluster)})
+					// Create route configuration - pass the cluster directly without type assertion
+					route := xds.CreateRoute(name, []string{rule.Host}, cluster.(*clusterv3.Cluster))
 					routes = append(routes, route)
 				}
 
@@ -128,7 +128,6 @@ func (r *IngressReconciler) processBatch() {
 		}
 
 		batchLog.Info("Successfully updated Envoy configuration")
-
 
 		// Clear the queue
 		r.updateQueue = make(map[string]networkingv1.Ingress)
