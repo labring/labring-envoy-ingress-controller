@@ -10,6 +10,7 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	"github.com/fanux/envoy-ingress-controller/pkg/controller"
@@ -41,10 +42,12 @@ func main() {
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
-		MetricsBindAddress:     metricsAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "envoy-ingress-controller-leader",
-		LeaderElectionConfig:   nil,
+		HealthProbeBindAddress: ":8081",
+		Metrics: metricsserver.Options{
+			BindAddress: metricsAddr,
+		},
+		LeaderElection:   enableLeaderElection,
+		LeaderElectionID: "envoy-ingress-controller-leader",
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
