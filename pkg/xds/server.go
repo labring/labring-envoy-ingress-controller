@@ -12,12 +12,16 @@ import (
 	endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	router "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	xds "github.com/envoyproxy/go-control-plane/pkg/server/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
@@ -84,6 +88,14 @@ func (s *Server) UpdateConfig(nodeID string, listeners []types.Resource, cluster
 }
 
 // Helper functions for creating Envoy resources
+func mustMarshalAny(msg proto.Message) *anypb.Any {
+	any, err := anypb.New(msg)
+	if err != nil {
+		panic(fmt.Sprintf("failed to marshal message to any: %v", err))
+	}
+	return any
+}
+
 func CreateListener(name string, address string, port uint32, routeName string) *listener.Listener {
 	return &listener.Listener{
 		Name: name,
@@ -102,23 +114,27 @@ func CreateListener(name string, address string, port uint32, routeName string) 
 			Filters: []*listener.Filter{{
 				Name: "envoy.filters.network.http_connection_manager",
 				ConfigType: &listener.Filter_TypedConfig{
-					TypedConfig: &anypb.Any{
-						TypeUrl: "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
-						Value: []byte(`{
-							"stat_prefix": "ingress_http",
-							"codec_type": "AUTO",
-							"rds": {
-								"route_config_name": "` + routeName + `",
-								"config_source": {
-									"resource_api_version": "V3",
-									"ads": {}
-								}
+					TypedConfig: mustMarshalAny(&hcm.HttpConnectionManager{
+						StatPrefix:  "ingress_http",
+						CodecType:  hcm.HttpConnectionManager_AUTO,
+						RouteSpecifier: &hcm.HttpConnectionManager_Rds{
+							Rds: &hcm.Rds{
+								RouteConfigName: routeName,
+								ConfigSource: &core.ConfigSource{
+									ResourceApiVersion: core.ApiVersion_V3,
+									ConfigSourceSpecifier: &core.ConfigSource_Ads{
+										Ads: &core.AggregatedConfigSource{},
+									},
+								},
 							},
-							"http_filters": [{
-								"name": "envoy.filters.http.router"
-							}]
-						}`),
-					},
+						},
+						HttpFilters: []*hcm.HttpFilter{{
+							Name: "envoy.filters.http.router",
+							ConfigType: &hcm.HttpFilter_TypedConfig{
+								TypedConfig: mustMarshalAny(&router.Router{}),
+							},
+						}},
+					}),
 				},
 			}},
 		}},
