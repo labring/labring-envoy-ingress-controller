@@ -13,7 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 
-	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/fanux/envoy-ingress-controller/pkg/xds"
 )
@@ -41,6 +41,7 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// Fetch the Ingress instance
 	var ingress networkingv1.Ingress
 	if err := r.Get(ctx, req.NamespacedName, &ingress); err != nil {
+		log.Error(err, "Unable to fetch Ingress")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -74,8 +75,8 @@ func (r *IngressReconciler) processBatch() {
 
 	// Process all queued updates
 	if len(r.updateQueue) > 0 {
-		log := r.Log.WithValues("batch_size", len(r.updateQueue))
-		log.Info("Processing batch of ingress updates")
+		batchLog := r.Log.WithValues("batch_size", len(r.updateQueue))
+		batchLog.Info("Processing batch of ingress updates")
 
 		// Convert ingress rules to Envoy configuration
 		var listeners []types.Resource
@@ -99,18 +100,18 @@ func (r *IngressReconciler) processBatch() {
 					backend := path.Backend
 					svcName := fmt.Sprintf("%s-%s", name, backend.Service.Name)
 					
-					// Create endpoint
+					// Create endpoint with uint32 conversion
 					ep := xds.CreateEndpoint(svcName,
 						[]string{fmt.Sprintf("%s.%s.svc.cluster.local", backend.Service.Name, ingress.Namespace)},
-						[]uint32{backend.Service.Port.Number})
+						[]uint32{uint32(backend.Service.Port.Number)})
 					endpoints = append(endpoints, ep)
 
 					// Create cluster
 					cluster := xds.CreateCluster(svcName, ep.Endpoints[0].LbEndpoints)
 					clusters = append(clusters, cluster)
 
-					// Create route configuration
-					route := xds.CreateRoute(name, []string{rule.Host}, []*cluster.Cluster{cluster})
+					// Create route configuration with proper type assertion
+					route := xds.CreateRoute(name, []string{rule.Host}, []*clusterv3.Cluster{cluster.(*clusterv3.Cluster)})
 					routes = append(routes, route)
 				}
 
@@ -122,11 +123,12 @@ func (r *IngressReconciler) processBatch() {
 
 		// Update xDS server with new configuration
 		if err := r.XDSServer.UpdateConfig("ingress", listeners, clusters, routes, endpoints); err != nil {
-			log.Error(err, "Failed to update xDS configuration")
+			batchLog.Error(err, "Failed to update xDS configuration")
 			return
 		}
 
-		log.Info("Successfully updated Envoy configuration")
+		batchLog.Info("Successfully updated Envoy configuration")
+
 
 		// Clear the queue
 		r.updateQueue = make(map[string]networkingv1.Ingress)
