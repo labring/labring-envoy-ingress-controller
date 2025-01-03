@@ -106,9 +106,13 @@ func CreateListener(name string, address string, port uint32, routeName string) 
 						TypeUrl: "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
 						Value: []byte(`{
 							"stat_prefix": "ingress_http",
-							"route_config": {
-								"name": "` + routeName + `",
-								"virtual_hosts": []
+							"codec_type": "AUTO",
+							"rds": {
+								"route_config_name": "` + routeName + `",
+								"config_source": {
+									"resource_api_version": "V3",
+									"ads": {}
+								}
 							},
 							"http_filters": [{
 								"name": "envoy.filters.http.router"
