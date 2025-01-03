@@ -13,6 +13,7 @@ spec:
       labels:
         app: envoy-ingress-controller
     spec:
+      hostNetwork: true
       serviceAccountName: envoy-ingress-controller
       containers:
       - name: controller
