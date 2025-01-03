@@ -6,13 +6,12 @@ WORKDIR /app
 # Install build dependencies
 RUN apk add --no-cache git
 
-# Copy Go module files
-COPY go.mod ./
-RUN go mod download
+# Copy source code first
+COPY . .
 
-# Copy source code
-COPY cmd/ cmd/
-COPY pkg/ pkg/
+# Download and verify modules
+RUN go mod download && \
+    go mod verify
 
 # Build the binary
 RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/controller cmd/controller/main.go
@@ -31,7 +30,7 @@ RUN adduser --system --group controller && \
     chown -R controller:controller /bin/controller /etc/envoy-ingress-controller
 
 # Set necessary capabilities for Envoy
-RUN setcap 'cap_net_bind_service=+ep' /usr/local/bin/envoy
+RUN setcap "cap_net_bind_service=+ep" /usr/local/bin/envoy
 
 # Switch to non-root user
 USER controller
