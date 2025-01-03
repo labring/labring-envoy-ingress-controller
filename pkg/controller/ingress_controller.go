@@ -13,7 +13,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 
-	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/fanux/envoy-ingress-controller/pkg/xds"
 )
@@ -95,12 +94,13 @@ func (r *IngressReconciler) processBatch() {
 					continue
 				}
 
-				// Create endpoints for each backend
+				// Create endpoints and clusters for each backend
+				var routeClusters []types.Resource
 				for _, path := range rule.HTTP.Paths {
 					backend := path.Backend
 					svcName := fmt.Sprintf("%s-%s", name, backend.Service.Name)
 					
-					// Create endpoint with uint32 conversion
+					// Create endpoint
 					ep := xds.CreateEndpoint(svcName,
 						[]string{fmt.Sprintf("%s.%s.svc.cluster.local", backend.Service.Name, ingress.Namespace)},
 						[]uint32{uint32(backend.Service.Port.Number)})
@@ -109,11 +109,12 @@ func (r *IngressReconciler) processBatch() {
 					// Create cluster
 					cluster := xds.CreateCluster(svcName, ep.Endpoints[0].LbEndpoints)
 					clusters = append(clusters, cluster)
-
-					// Create route configuration - pass the cluster directly without type assertion
-					route := xds.CreateRoute(name, []string{rule.Host}, cluster.(*clusterv3.Cluster))
-					routes = append(routes, route)
+					routeClusters = append(routeClusters, cluster)
 				}
+
+				// Create route configuration
+				route := xds.CreateRoute(name, []string{rule.Host}, routeClusters)
+				routes = append(routes, route)
 
 				// Create listener for the host
 				listener := xds.CreateListener(name, "0.0.0.0", 80, name)
@@ -126,6 +127,7 @@ func (r *IngressReconciler) processBatch() {
 			batchLog.Error(err, "Failed to update xDS configuration")
 			return
 		}
+
 
 		batchLog.Info("Successfully updated Envoy configuration")
 
