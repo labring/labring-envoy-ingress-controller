@@ -24,6 +24,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
+	networkingv1 "k8s.io/api/networking/v1"
 )
 
 type Server struct {
@@ -112,7 +113,7 @@ func CreateListener(name string, address string, port uint32, routeName string) 
 		},
 		FilterChains: []*listener.FilterChain{{
 			Filters: []*listener.Filter{{
-				Name: "envoy.filters.network.http_connection_manager",
+				Name: wellknown.HTTPConnectionManager,
 				ConfigType: &listener.Filter_TypedConfig{
 					TypedConfig: mustMarshalAny(&hcm.HttpConnectionManager{
 						StatPrefix:  "ingress_http",
@@ -129,7 +130,7 @@ func CreateListener(name string, address string, port uint32, routeName string) 
 							},
 						},
 						HttpFilters: []*hcm.HttpFilter{{
-							Name: "envoy.filters.http.router",
+							Name: wellknown.Router,
 							ConfigType: &hcm.HttpFilter_TypedConfig{
 								TypedConfig: mustMarshalAny(&router.Router{}),
 							},
@@ -158,33 +159,37 @@ func CreateCluster(name string, endpoints []*endpoint.LbEndpoint) *cluster.Clust
 	}
 }
 
-func CreateRoute(name string, domains []string, clusters []*cluster.Cluster) *route.RouteConfiguration {
-	var virtualHosts []*route.VirtualHost
-	for i, cluster := range clusters {
-		virtualHosts = append(virtualHosts, &route.VirtualHost{
-			Name:    fmt.Sprintf("%s-vhost-%d", name, i),
-			Domains: domains,
-			Routes: []*route.Route{{
-				Match: &route.RouteMatch{
-					PathSpecifier: &route.RouteMatch_Prefix{
-						Prefix: "/",
-					},
-				},
-				Action: &route.Route_Route{
-					Route: &route.RouteAction{
-						ClusterSpecifier: &route.RouteAction_Cluster{
-							Cluster: cluster.Name,
-						},
-						Timeout: durationpb.New(15 * time.Second),
-					},
-				},
-			}},
-		})
-	}
-	
+func CreateRoute(name string, virtualHosts []*route.VirtualHost) *route.RouteConfiguration {
 	return &route.RouteConfiguration{
 		Name:         name,
 		VirtualHosts: virtualHosts,
+	}
+}
+
+func CreateVirtualHost(name string, domains []string, paths []*networkingv1.HTTPIngressPath) *route.VirtualHost {
+	var routes []*route.Route
+	for _, path := range paths {
+		routes = append(routes, &route.Route{
+			Match: &route.RouteMatch{
+				PathSpecifier: &route.RouteMatch_Prefix{
+					Prefix: path.Path,
+				},
+			},
+			Action: &route.Route_Route{
+				Route: &route.RouteAction{
+					ClusterSpecifier: &route.RouteAction_Cluster{
+						Cluster: fmt.Sprintf("%s-%s", name, path.Backend.Service.Name),
+					},
+					Timeout: durationpb.New(15 * time.Second),
+				},
+			},
+		})
+	}
+	
+	return &route.VirtualHost{
+		Name:    name,
+		Domains: domains,
+		Routes:  routes,
 	}
 }
 
