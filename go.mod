@@ -1,6 +1,6 @@
 module github.com/fanux/envoy-ingress-controller
 
-go 1.20
+go 1.21
 
 require (
 	github.com/envoyproxy/go-control-plane v0.11.1
