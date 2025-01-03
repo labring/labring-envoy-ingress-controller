@@ -1,0 +1,166 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy-ingress-controller
+  namespace: kube-system
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: envoy-ingress-controller
+  template:
+    metadata:
+      labels:
+        app: envoy-ingress-controller
+    spec:
+      serviceAccountName: envoy-ingress-controller
+      containers:
+      - name: controller
+        image: envoy-ingress-controller:latest
+        args:
+        - --enable-leader-election
+        - --metrics-addr=:8080
+        - --xds-addr=:18000
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+          requests:
+            cpu: 500m
+            memory: 512Mi
+      - name: envoy
+        image: envoyproxy/envoy:v1.28.0
+        command:
+        - envoy
+        args:
+        - -c
+        - /etc/envoy/envoy.yaml
+        - --service-node
+        - $(POD_NAME)
+        - --service-cluster
+        - $(POD_NAMESPACE)
+        resources:
+          limits:
+            cpu: 2000m
+            memory: 2Gi
+          requests:
+            cpu: 1000m
+            memory: 1Gi
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        ports:
+        - name: http
+          containerPort: 80
+        - name: https
+          containerPort: 443
+        - name: admin
+          containerPort: 9901
+        volumeMounts:
+        - name: envoy-config
+          mountPath: /etc/envoy
+      volumes:
+      - name: envoy-config
+        configMap:
+          name: envoy-config
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: envoy-ingress-controller
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: envoy-ingress-controller
+rules:
+- apiGroups: [""]
+  resources: ["services", "endpoints", "secrets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: envoy-ingress-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: envoy-ingress-controller
+subjects:
+- kind: ServiceAccount
+  name: envoy-ingress-controller
+  namespace: kube-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-config
+  namespace: kube-system
+data:
+  envoy.yaml: |
+    admin:
+      access_log_path: /tmp/admin_access.log
+      address:
+        socket_address:
+          protocol: TCP
+          address: 0.0.0.0
+          port_value: 9901
+    node:
+      cluster: envoy-ingress
+      id: ${POD_NAME}.${POD_NAMESPACE}
+    dynamic_resources:
+      ads_config:
+        api_type: GRPC
+        transport_api_version: V3
+        grpc_services:
+        - envoy_grpc:
+            cluster_name: xds_cluster
+      cds_config:
+        resource_api_version: V3
+        ads: {}
+      lds_config:
+        resource_api_version: V3
+        ads: {}
+    static_resources:
+      clusters:
+      - name: xds_cluster
+        connect_timeout: 1s
+        type: STRICT_DNS
+        lb_policy: ROUND_ROBIN
+        http2_protocol_options: {}
+        load_assignment:
+          cluster_name: xds_cluster
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: localhost
+                    port_value: 18000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: envoy-ingress
+  namespace: kube-system
+spec:
+  type: LoadBalancer
+  selector:
+    app: envoy-ingress-controller
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+  - name: https
+    port: 443
+    targetPort: 443
