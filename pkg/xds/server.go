@@ -51,7 +51,8 @@ func (s *Server) Run(address string) error {
 	grpcServer := grpc.NewServer()
 	discovery.RegisterAggregatedDiscoveryServiceServer(grpcServer, s.server)
 
-	listener, err := net.Listen("tcp", address)
+	// Listen on all interfaces for xDS server
+	listener, err := net.Listen("tcp", "0.0.0.0:18000")
 	if err != nil {
 		return fmt.Errorf("failed to listen: %v", err)
 	}

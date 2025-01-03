@@ -33,7 +33,7 @@ func main() {
 	var xdsAddr string
 
 	flag.StringVar(&metricsAddr, "metrics-addr", ":8080", "The address the metric endpoint binds to.")
-	flag.StringVar(&xdsAddr, "xds-addr", ":18000", "The address the xDS server binds to.")
+	flag.StringVar(&xdsAddr, "xds-addr", "0.0.0.0:18000", "The address the xDS server binds to.")
 	flag.BoolVar(&enableLeaderElection, "enable-leader-election", false,
 		"Enable leader election for controller manager.")
 	flag.Parse()
