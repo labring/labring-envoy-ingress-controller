@@ -16,7 +16,7 @@ spec:
       serviceAccountName: envoy-ingress-controller
       containers:
       - name: controller
-        image: envoy-ingress-controller:latest
+        image: labring/envoy-ingress-controller:latest
         imagePullPolicy: IfNotPresent
         args:
         - --enable-leader-election
