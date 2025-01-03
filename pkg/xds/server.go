@@ -3,61 +3,36 @@ package xds
 import (
 	"context"
 	"fmt"
-	"net"
+	"time"
 
 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
-	router "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
-	"github.com/envoyproxy/go-control-plane/pkg/server/v3"
-	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
-	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
-type EnvoyXdsServer struct {
-	server server.Server
-	cache  cache.SnapshotCache
+type Server struct {
+	snapshotCache cache.SnapshotCache
+	version       int64
 }
 
-func NewXdsServer() *EnvoyXdsServer {
-	cache := cache.NewSnapshotCache(false, cache.IDHash{}, nil)
-	srv := server.NewServer(context.Background(), cache, nil)
-	return &EnvoyXdsServer{
-		server: srv,
-		cache:  cache,
+func NewServer() *Server {
+	return &Server{
+		snapshotCache: cache.NewSnapshotCache(false, cache.IDHash{}, nil),
+		version:       0,
 	}
 }
 
-func (s *EnvoyXdsServer) Start(address string) error {
-	grpcServer := grpc.NewServer()
-	listener, err := net.Listen("tcp", address)
-	if err != nil {
-		return err
-	}
-
-	// Register all xDS services
-	resource.RegisterRouteDiscoveryServiceServer(grpcServer, s.server)
-	resource.RegisterEndpointDiscoveryServiceServer(grpcServer, s.server)
-	resource.RegisterClusterDiscoveryServiceServer(grpcServer, s.server)
-	resource.RegisterListenerDiscoveryServiceServer(grpcServer, s.server)
-
-	return grpcServer.Serve(listener)
-}
-
-func (s *EnvoyXdsServer) UpdateConfig(nodeID string, clusters []*cluster.Cluster, routes []*route.RouteConfiguration) error {
-	// Create a listener with HTTP connection manager
-	routerConfig, err := anypb.New(&router.Router{})
-	if err != nil {
-		return fmt.Errorf("failed to marshal router config: %v", err)
-	}
-
+func (s *Server) CreateSnapshot(clusters []*cluster.Cluster, endpoints []*endpoint.ClusterLoadAssignment, routes []*route.RouteConfiguration) error {
+	// Create a listener with proper connection timeouts and circuit breakers
 	manager := &hcm.HttpConnectionManager{
 		CodecType:  hcm.HttpConnectionManager_AUTO,
 		StatPrefix: "ingress_http",
@@ -65,20 +40,36 @@ func (s *EnvoyXdsServer) UpdateConfig(nodeID string, clusters []*cluster.Cluster
 			RouteConfig: routes[0],
 		},
 		HttpFilters: []*hcm.HttpFilter{{
-			Name: wellknown.Router,
+			Name: "envoy.filters.http.router",
 			ConfigType: &hcm.HttpFilter_TypedConfig{
-				TypedConfig: routerConfig,
+				TypedConfig: mustMarshalAny(&hcm.Router{}),
 			},
 		}},
+		CommonHttpProtocolOptions: &core.HttpProtocolOptions{
+			IdleTimeout: durationpb.New(60 * time.Second),
+			// Add HTTP/2 specific settings
+			Http2ProtocolOptions: &core.Http2ProtocolOptions{
+				MaxConcurrentStreams:            wrapperspb.UInt32(100),
+				InitialStreamWindowSize:         wrapperspb.UInt32(65536),
+				InitialConnectionWindowSize:     wrapperspb.UInt32(1048576),
+				AllowConnect:                    true,
+				MaxOutboundFrames:              wrapperspb.UInt32(10000),
+				MaxOutboundControlFrames:       wrapperspb.UInt32(1000),
+				MaxConsecutiveInboundFramesWithEmptyPayload: wrapperspb.UInt32(1),
+				StreamErrorOnInvalidHttpMessaging: true,
+			},
+		},
+		StreamIdleTimeout: durationpb.New(5 * time.Second),
+		AccessLog:         createAccessLog(),
 	}
 
 	pbst, err := anypb.New(manager)
 	if err != nil {
-		return fmt.Errorf("failed to marshal connection manager: %v", err)
+		return fmt.Errorf("failed to marshal HTTP connection manager: %v", err)
 	}
 
 	listener := &listener.Listener{
-		Name: "http_listener",
+		Name: "ingress_listener",
 		Address: &core.Address{
 			Address: &core.Address_SocketAddress{
 				SocketAddress: &core.SocketAddress{
@@ -92,49 +83,146 @@ func (s *EnvoyXdsServer) UpdateConfig(nodeID string, clusters []*cluster.Cluster
 		},
 		FilterChains: []*listener.FilterChain{{
 			Filters: []*listener.Filter{{
-				Name: wellknown.HTTPConnectionManager,
+				Name: "envoy.filters.network.http_connection_manager",
 				ConfigType: &listener.Filter_TypedConfig{
 					TypedConfig: pbst,
 				},
 			}},
 		}},
+		EnableReusePort: wrapperspb.Bool(true),
 	}
 
-	// Create snapshot with all resources
-	snap, err := cache.NewSnapshot("1",
+	// Create snapshot with proper versioning
+	s.version++
+	version := fmt.Sprintf("v%d", s.version)
+	snapshot, err := cache.NewSnapshot(version,
 		map[resource.Type][]types.Resource{
-			resource.ClusterType:  convertToResource(clusters),
-			resource.RouteType:    convertToResource(routes),
+			resource.ClusterType:  toResources(clusters),
+			resource.EndpointType: toResources(endpoints),
+			resource.RouteType:    toResources(routes),
 			resource.ListenerType: {listener},
-		})
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("failed to create snapshot: %v", err)
 	}
 
-	// Set the snapshot for the node
-	err = s.cache.SetSnapshot(context.Background(), nodeID, snap)
-	if err != nil {
-		return fmt.Errorf("failed to set snapshot: %v", err)
-	}
-
-	return nil
+	return s.snapshotCache.SetSnapshot(context.Background(), "ingress", snapshot)
 }
 
-func convertToResource(resources interface{}) []types.Resource {
-	switch v := resources.(type) {
+func (s *Server) Cache() cache.SnapshotCache {
+	return s.snapshotCache
+}
+
+func createAccessLog() []*hcm.AccessLog {
+	return []*hcm.AccessLog{{
+		Name: "envoy.access_loggers.stdout",
+		ConfigType: &hcm.AccessLog_TypedConfig{
+			TypedConfig: mustMarshalAny(&hcm.AccessLog{}),
+		},
+	}}
+}
+
+func toResources(slice interface{}) []types.Resource {
+	switch v := slice.(type) {
 	case []*cluster.Cluster:
-		result := make([]types.Resource, len(v))
-		for i, r := range v {
-			result[i] = r
+		resources := make([]types.Resource, len(v))
+		for i := range v {
+			resources[i] = v[i]
 		}
-		return result
+		return resources
+	case []*endpoint.ClusterLoadAssignment:
+		resources := make([]types.Resource, len(v))
+		for i := range v {
+			resources[i] = v[i]
+		}
+		return resources
 	case []*route.RouteConfiguration:
-		result := make([]types.Resource, len(v))
-		for i, r := range v {
-			result[i] = r
+		resources := make([]types.Resource, len(v))
+		for i := range v {
+			resources[i] = v[i]
 		}
-		return result
+		return resources
 	default:
 		return nil
+	}
+}
+
+func mustMarshalAny(message interface{}) *anypb.Any {
+	a, err := anypb.New(message.(interface{ ProtoReflect() }))
+	if err != nil {
+		panic(err)
+	}
+	return a
+}
+
+func CreateCluster(name string, endpoints []*endpoint.LbEndpoint) *cluster.Cluster {
+	return &cluster.Cluster{
+		Name:                 name,
+		ConnectTimeout:       durationpb.New(5 * time.Second),
+		ClusterDiscoveryType: &cluster.Cluster_Type{Type: cluster.Cluster_EDS},
+		LbPolicy:            cluster.Cluster_ROUND_ROBIN,
+		EdsClusterConfig: &cluster.Cluster_EdsClusterConfig{
+			EdsConfig: &core.ConfigSource{
+				ConfigSourceSpecifier: &core.ConfigSource_Ads{
+					Ads: &core.AggregatedConfigSource{},
+				},
+				ResourceApiVersion: core.ApiVersion_V3,
+			},
+		},
+		HealthChecks: []*core.HealthCheck{{
+			Timeout:            durationpb.New(2 * time.Second),
+			Interval:           durationpb.New(5 * time.Second),
+			UnhealthyThreshold: wrapperspb.UInt32(3),
+			HealthyThreshold:   wrapperspb.UInt32(2),
+			HealthChecker: &core.HealthCheck_HttpHealthCheck_{
+				HttpHealthCheck: &core.HealthCheck_HttpHealthCheck{
+					Path: "/healthz",
+					Host: "health.local",
+				},
+			},
+		}},
+		CircuitBreakers: &cluster.CircuitBreakers{
+			Thresholds: []*cluster.CircuitBreakers_Thresholds{{
+				Priority:           core.RoutingPriority_DEFAULT,
+				MaxConnections:     wrapperspb.UInt32(1000),
+				MaxPendingRequests: wrapperspb.UInt32(1000),
+				MaxRequests:        wrapperspb.UInt32(1000),
+				MaxRetries:         wrapperspb.UInt32(3),
+			}},
+		},
+		OutlierDetection: &cluster.OutlierDetection{
+			Consecutive_5Xx:                    wrapperspb.UInt32(5),
+			Interval:                           durationpb.New(10 * time.Second),
+			BaseEjectionTime:                   durationpb.New(30 * time.Second),
+			MaxEjectionPercent:                 wrapperspb.UInt32(10),
+			EnforcingConsecutive_5Xx:          wrapperspb.UInt32(100),
+			EnforcingSuccessRate:              wrapperspb.UInt32(100),
+			SuccessRateMinimumHosts:           wrapperspb.UInt32(5),
+			SuccessRateRequestVolume:          wrapperspb.UInt32(100),
+			SuccessRateStdevFactor:            wrapperspb.UInt32(1900),
+		},
+	}
+}
+
+func CreateEndpoint(clusterName string, endpoints []*endpoint.LbEndpoint) *endpoint.ClusterLoadAssignment {
+	return &endpoint.ClusterLoadAssignment{
+		ClusterName: clusterName,
+		Endpoints: []*endpoint.LocalityLbEndpoints{{
+			LbEndpoints: endpoints,
+			Priority:    0,
+		}},
+	}
+}
+
+func CreateRoute(name string, domains []string, routes []*route.Route) *route.RouteConfiguration {
+	return &route.RouteConfiguration{
+		Name: name,
+		VirtualHosts: []*route.VirtualHost{{
+			Name:    name,
+			Domains: domains,
+			Routes:  routes,
+		}},
+		ValidateClusters: wrapperspb.Bool(true),
 	}
 }
