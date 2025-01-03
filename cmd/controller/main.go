@@ -43,7 +43,7 @@ func main() {
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		HealthProbeBindAddress: ":8081",
-		Metrics: metricsserver.Options{
+		Metrics: server.Options{
 			BindAddress: metricsAddr,
 		},
 		LeaderElection:   enableLeaderElection,
