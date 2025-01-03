@@ -40,10 +40,12 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:             scheme,
-		MetricsBindAddress: metricsAddr,
-		LeaderElection:     enableLeaderElection,
-		LeaderElectionID:   "envoy-ingress-controller-leader",
+		Scheme: scheme,
+		Metrics: ctrl.MetricsOptions{
+			BindAddress: metricsAddr,
+		},
+		LeaderElection:   enableLeaderElection,
+		LeaderElectionID: "envoy-ingress-controller-leader",
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
