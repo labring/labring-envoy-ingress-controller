@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 
+	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/fanux/envoy-ingress-controller/pkg/xds"
 )
@@ -95,7 +96,7 @@ func (r *IngressReconciler) processBatch() {
 				}
 
 				// Create endpoints and clusters for each backend
-				var routeClusters []types.Resource
+				var routeClusters []*cluster.Cluster
 				for _, path := range rule.HTTP.Paths {
 					backend := path.Backend
 					svcName := fmt.Sprintf("%s-%s", name, backend.Service.Name)
@@ -107,9 +108,9 @@ func (r *IngressReconciler) processBatch() {
 					endpoints = append(endpoints, ep)
 
 					// Create cluster
-					cluster := xds.CreateCluster(svcName, ep.Endpoints[0].LbEndpoints)
-					clusters = append(clusters, cluster)
-					routeClusters = append(routeClusters, cluster)
+					clusterObj := xds.CreateCluster(svcName, ep.Endpoints[0].LbEndpoints)
+					clusters = append(clusters, clusterObj)
+					routeClusters = append(routeClusters, clusterObj)
 				}
 
 				// Create route configuration

@@ -3,13 +3,13 @@ FROM golang:1.21-alpine AS builder
 
 WORKDIR /app
 
-# Install build dependencies
+# Install git for go mod download
 RUN apk add --no-cache git
 
-# Copy source code first
+# Copy the source code
 COPY . .
 
-# Download and verify modules
+# Download dependencies and verify modules
 RUN go mod download && \
     go mod verify
 
@@ -22,12 +22,17 @@ FROM envoyproxy/envoy:v1.27-latest
 # Copy the controller binary
 COPY --from=builder /bin/controller /bin/controller
 
-# Copy deployment configurations
+# Copy deployment configuration
 COPY deployments/deployment.yaml /etc/envoy-ingress-controller/deployment.yaml
 
-# Create non-root user for security
+# Create non-root user
 RUN adduser --system --group controller && \
     chown -R controller:controller /bin/controller /etc/envoy-ingress-controller
+
+# Install libcap2-bin for setcap command
+RUN apt-get update && \
+    apt-get install -y libcap2-bin && \
+    rm -rf /var/lib/apt/lists/*
 
 # Set necessary capabilities for Envoy
 RUN setcap "cap_net_bind_service=+ep" /usr/local/bin/envoy
@@ -35,12 +40,5 @@ RUN setcap "cap_net_bind_service=+ep" /usr/local/bin/envoy
 # Switch to non-root user
 USER controller
 
-# Set environment variables
-ENV ENVOY_ADMIN_PORT=9901
-ENV CONTROLLER_PORT=8080
-
-# Expose ports
-EXPOSE 80 443 ${ENVOY_ADMIN_PORT} ${CONTROLLER_PORT}
-
-# Start both Envoy and the controller
-CMD ["/bin/controller"]
+# Set the entrypoint
+ENTRYPOINT ["/bin/controller"]
