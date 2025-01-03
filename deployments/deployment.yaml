@@ -15,6 +15,11 @@ spec:
     spec:
       hostNetwork: true
       serviceAccountName: envoy-ingress-controller
+      strategy:
+        type: RollingUpdate
+        rollingUpdate:
+          maxSurge: 0
+          maxUnavailable: 1
       containers:
       - name: controller
         image: labring/envoy-ingress-controller:latest
