@@ -11,9 +11,14 @@ import (
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	router "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
+	accesslogfile "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/file/v3"
+	accesslog "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
@@ -36,28 +41,40 @@ func (s *Server) CreateSnapshot(clusters []*cluster.Cluster, endpoints []*endpoi
 	manager := &hcm.HttpConnectionManager{
 		CodecType:  hcm.HttpConnectionManager_AUTO,
 		StatPrefix: "ingress_http",
-		RouteSpecifier: &hcm.HttpConnectionManager_RouteConfig{
-			RouteConfig: routes[0],
+		RouteSpecifier: &hcm.HttpConnectionManager_Rds{
+			Rds: &hcm.Rds{
+				ConfigSource: &core.ConfigSource{
+					ResourceApiVersion: core.ApiVersion_V3,
+					ConfigSourceSpecifier: &core.ConfigSource_Ads{
+						Ads: &core.AggregatedConfigSource{},
+					},
+				},
+				RouteConfigName: "ingress_routes",
+			},
 		},
 		HttpFilters: []*hcm.HttpFilter{{
-			Name: "envoy.filters.http.router",
+			Name: wellknown.Router,
 			ConfigType: &hcm.HttpFilter_TypedConfig{
-				TypedConfig: mustMarshalAny(&hcm.Router{}),
+				TypedConfig: mustMarshalAny(&router.Router{
+					SuppressEnvoyHeaders: true,
+				}),
 			},
 		}},
 		CommonHttpProtocolOptions: &core.HttpProtocolOptions{
 			IdleTimeout: durationpb.New(60 * time.Second),
-			// Add HTTP/2 specific settings
-			Http2ProtocolOptions: &core.Http2ProtocolOptions{
-				MaxConcurrentStreams:            wrapperspb.UInt32(100),
-				InitialStreamWindowSize:         wrapperspb.UInt32(65536),
-				InitialConnectionWindowSize:     wrapperspb.UInt32(1048576),
-				AllowConnect:                    true,
-				MaxOutboundFrames:              wrapperspb.UInt32(10000),
-				MaxOutboundControlFrames:       wrapperspb.UInt32(1000),
-				MaxConsecutiveInboundFramesWithEmptyPayload: wrapperspb.UInt32(1),
-				StreamErrorOnInvalidHttpMessaging: true,
-			},
+		},
+		UpgradeConfigs: []*hcm.HttpConnectionManager_UpgradeConfig{{
+			UpgradeType: "websocket",
+		}},
+		Http2Options: &core.Http2ProtocolOptions{
+			MaxConcurrentStreams:            wrapperspb.UInt32(100),
+			InitialStreamWindowSize:         wrapperspb.UInt32(65536),
+			InitialConnectionWindowSize:     wrapperspb.UInt32(1048576),
+			AllowConnect:                    true,
+			MaxOutboundFrames:              wrapperspb.UInt32(10000),
+			MaxOutboundControlFrames:       wrapperspb.UInt32(1000),
+			MaxConsecutiveInboundFramesWithEmptyPayload: wrapperspb.UInt32(1),
+			StreamErrorOnInvalidHttpMessaging: true,
 		},
 		StreamIdleTimeout: durationpb.New(5 * time.Second),
 		AccessLog:         createAccessLog(),
@@ -116,9 +133,16 @@ func (s *Server) Cache() cache.SnapshotCache {
 
 func createAccessLog() []*hcm.AccessLog {
 	return []*hcm.AccessLog{{
-		Name: "envoy.access_loggers.stdout",
+		Name: wellknown.FileAccessLog,
 		ConfigType: &hcm.AccessLog_TypedConfig{
-			TypedConfig: mustMarshalAny(&hcm.AccessLog{}),
+			TypedConfig: mustMarshalAny(&accesslogfile.FileAccessLog{
+				Path: "/dev/stdout",
+				AccessLogFormat: &accesslogfile.FileAccessLog_TextLogFormat{
+					TextLogFormat: &accesslog.TextAccessLogFormat{
+						LogFormat: "[%START_TIME%] \"%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%\" %RESPONSE_CODE% %RESPONSE_FLAGS% %BYTES_RECEIVED% %BYTES_SENT% %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% \"%REQ(X-FORWARDED-FOR)%\" \"%REQ(USER-AGENT)%\" \"%REQ(X-REQUEST-ID)%\" \"%REQ(:AUTHORITY)%\" \"%UPSTREAM_HOST%\"\n",
+					},
+				},
+			}),
 		},
 	}}
 }
@@ -148,12 +172,15 @@ func toResources(slice interface{}) []types.Resource {
 	}
 }
 
-func mustMarshalAny(message interface{}) *anypb.Any {
-	a, err := anypb.New(message.(interface{ ProtoReflect() }))
+func mustMarshalAny(message proto.Message) *anypb.Any {
+	if message == nil {
+		panic("nil message")
+	}
+	any, err := anypb.New(message)
 	if err != nil {
 		panic(err)
 	}
-	return a
+	return any
 }
 
 func CreateCluster(name string, endpoints []*endpoint.LbEndpoint) *cluster.Cluster {
