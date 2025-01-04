@@ -36,8 +36,16 @@ func (s *Server) CreateSnapshot(clusters []*cluster.Cluster, endpoints []*endpoi
 	manager := &hcm.HttpConnectionManager{
 		CodecType:  hcm.HttpConnectionManager_AUTO,
 		StatPrefix: "ingress_http",
-		RouteSpecifier: &hcm.HttpConnectionManager_RouteConfig{
-			RouteConfig: routes[0],
+		RouteSpecifier: &hcm.HttpConnectionManager_Rds{
+			Rds: &hcm.Rds{
+				ConfigSource: &core.ConfigSource{
+					ResourceApiVersion: core.ApiVersion_V3,
+					ConfigSourceSpecifier: &core.ConfigSource_Ads{
+						Ads: &core.AggregatedConfigSource{},
+					},
+				},
+				RouteConfigName: "ingress_routes",
+			},
 		},
 		HttpFilters: []*hcm.HttpFilter{{
 			Name: "envoy.filters.http.router",
