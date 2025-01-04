@@ -119,7 +119,7 @@ func (r *IngressReconciler) processBatch() {
 				var routes []*route.Route
 				for _, path := range rule.HTTP.Paths {
 					backend := path.Backend
-					svcName := fmt.Sprintf("%s_%s_%d", backend.Service.Name, ingress.Namespace, backend.Service.Port.Number)
+					svcName := backend.Service.Name
 					svcHost := fmt.Sprintf("%s.%s.svc.cluster.local", backend.Service.Name, ingress.Namespace)
 					
 					// Create cluster if not already created

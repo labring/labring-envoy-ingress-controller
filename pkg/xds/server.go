@@ -66,16 +66,6 @@ func (s *Server) CreateSnapshot(clusters []*cluster.Cluster, endpoints []*endpoi
 		UpgradeConfigs: []*hcm.HttpConnectionManager_UpgradeConfig{{
 			UpgradeType: "websocket",
 		}},
-		Http2Options: &core.Http2ProtocolOptions{
-			MaxConcurrentStreams:            wrapperspb.UInt32(100),
-			InitialStreamWindowSize:         wrapperspb.UInt32(65536),
-			InitialConnectionWindowSize:     wrapperspb.UInt32(1048576),
-			AllowConnect:                    true,
-			MaxOutboundFrames:              wrapperspb.UInt32(10000),
-			MaxOutboundControlFrames:       wrapperspb.UInt32(1000),
-			MaxConsecutiveInboundFramesWithEmptyPayload: wrapperspb.UInt32(1),
-			StreamErrorOnInvalidHttpMessaging: true,
-		},
 		StreamIdleTimeout: durationpb.New(5 * time.Second),
 		AccessLog:         createAccessLog(),
 	}
@@ -132,17 +122,26 @@ func (s *Server) Cache() cache.SnapshotCache {
 }
 
 func createAccessLog() []*hcm.AccessLog {
-	return []*hcm.AccessLog{{
-		Name: wellknown.FileAccessLog,
-		ConfigType: &hcm.AccessLog_TypedConfig{
-			TypedConfig: mustMarshalAny(&accesslogfile.FileAccessLog{
-				Path: "/dev/stdout",
-				AccessLogFormat: &accesslogfile.FileAccessLog_TextLogFormat{
-					TextLogFormat: &accesslog.TextAccessLogFormat{
-						LogFormat: "[%START_TIME%] \"%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%\" %RESPONSE_CODE% %RESPONSE_FLAGS% %BYTES_RECEIVED% %BYTES_SENT% %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% \"%REQ(X-FORWARDED-FOR)%\" \"%REQ(USER-AGENT)%\" \"%REQ(X-REQUEST-ID)%\" \"%REQ(:AUTHORITY)%\" \"%UPSTREAM_HOST%\"\n",
-					},
+	accessLog := &accesslogfile.FileAccessLog{
+		Path: "/dev/stdout",
+		AccessLogFormat: &accesslogfile.FileAccessLog_LogFormat{
+			LogFormat: &core.SubstitutionFormatString{
+				Format: &core.SubstitutionFormatString_TextFormat{
+					TextFormat: "[%START_TIME%] \"%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%\" %RESPONSE_CODE% %RESPONSE_FLAGS% %BYTES_RECEIVED% %BYTES_SENT% %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% \"%REQ(X-FORWARDED-FOR)%\" \"%REQ(USER-AGENT)%\" \"%REQ(X-REQUEST-ID)%\" \"%REQ(:AUTHORITY)%\" \"%UPSTREAM_HOST%\"\n",
 				},
-			}),
+			},
+		},
+	}
+	
+	pbst, err := anypb.New(accessLog)
+	if err != nil {
+		panic(fmt.Sprintf("failed to marshal access log config: %v", err))
+	}
+	
+	return []*hcm.AccessLog{{
+		Name: "envoy.access_loggers.file",
+		ConfigType: &hcm.AccessLog_TypedConfig{
+			TypedConfig: pbst,
 		},
 	}}
 }
@@ -178,7 +177,7 @@ func mustMarshalAny(message proto.Message) *anypb.Any {
 	}
 	any, err := anypb.New(message)
 	if err != nil {
-		panic(err)
+		panic(fmt.Sprintf("failed to marshal message: %v", err))
 	}
 	return any
 }
