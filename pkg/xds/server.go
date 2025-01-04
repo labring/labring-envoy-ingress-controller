@@ -12,7 +12,7 @@ import (
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	router "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
-	accesslogfile "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/file/v3"
+	envoy_file_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/access_loggers/file/v3"
 	accesslog "github.com/envoyproxy/go-control-plane/envoy/config/accesslog/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/types"
 	"github.com/envoyproxy/go-control-plane/pkg/cache/v3"
@@ -67,7 +67,12 @@ func (s *Server) CreateSnapshot(clusters []*cluster.Cluster, endpoints []*endpoi
 			UpgradeType: "websocket",
 		}},
 		StreamIdleTimeout: durationpb.New(5 * time.Second),
-		AccessLog:         createAccessLog(),
+		AccessLogs: createAccessLog(),
+		HttpProtocolOptions: &core.Http2ProtocolOptions{
+			MaxConcurrentStreams: wrapperspb.UInt32(1000),
+			InitialStreamWindowSize: wrapperspb.UInt32(65536),
+			InitialConnectionWindowSize: wrapperspb.UInt32(1048576),
+		},
 	}
 
 	pbst, err := anypb.New(manager)
@@ -122,24 +127,29 @@ func (s *Server) Cache() cache.SnapshotCache {
 }
 
 func createAccessLog() []*hcm.AccessLog {
-	accessLog := &accesslogfile.FileAccessLog{
+	fileAccessLog := &envoy_file_v3.FileAccessLog{
 		Path: "/dev/stdout",
-		AccessLogFormat: &accesslogfile.FileAccessLog_LogFormat{
-			LogFormat: &core.SubstitutionFormatString{
-				Format: &core.SubstitutionFormatString_TextFormat{
-					TextFormat: "[%START_TIME%] \"%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%\" %RESPONSE_CODE% %RESPONSE_FLAGS% %BYTES_RECEIVED% %BYTES_SENT% %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% \"%REQ(X-FORWARDED-FOR)%\" \"%REQ(USER-AGENT)%\" \"%REQ(X-REQUEST-ID)%\" \"%REQ(:AUTHORITY)%\" \"%UPSTREAM_HOST%\"\n",
+		AccessLogFormat: &envoy_file_v3.FileAccessLog_Format{
+			Format: &core.SubstitutionFormatString{
+				Format: &core.SubstitutionFormatString_TextFormatSource{
+					TextFormatSource: &core.DataSource{
+						Specifier: &core.DataSource_InlineString{
+							InlineString: "[%START_TIME%] \"%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%\" %RESPONSE_CODE% %RESPONSE_FLAGS% %BYTES_RECEIVED% %BYTES_SENT% %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% \"%REQ(X-FORWARDED-FOR)%\" \"%REQ(USER-AGENT)%\" \"%REQ(X-REQUEST-ID)%\" \"%REQ(:AUTHORITY)%\" \"%UPSTREAM_HOST%\"\n",
+						},
+					},
 				},
 			},
 		},
 	}
-	
-	pbst, err := anypb.New(accessLog)
+
+	pbst, err := anypb.New(fileAccessLog)
 	if err != nil {
-		panic(fmt.Sprintf("failed to marshal access log config: %v", err))
+		log.Printf("failed to marshal file access log config: %v", err)
+		return nil
 	}
-	
+
 	return []*hcm.AccessLog{{
-		Name: "envoy.access_loggers.file",
+		Name: wellknown.FileAccessLog,
 		ConfigType: &hcm.AccessLog_TypedConfig{
 			TypedConfig: pbst,
 		},
